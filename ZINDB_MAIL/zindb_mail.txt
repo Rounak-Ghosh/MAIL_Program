@@ -1,0 +1,340 @@
+*&---------------------------------------------------------------------*
+*& Report ZINDB_MAIL
+*&---------------------------------------------------------------------*
+*& Created By    : Rounak Ghosh - ATC (ABAP)
+*& Created On    : 26.11.2024
+*& Description   : IndusInd Bank Mail Integration
+*& Approach      : Payment Advice for IndusInd
+*&---------------------------------------------------------------------*
+REPORT zindb_mail.
+
+TYPES : ty_t_pdf  TYPE STANDARD TABLE OF tline.
+DATA: it_bukrs         TYPE TABLE OF selopt,
+      it_date          TYPE TABLE OF selopt,
+      it_doc           TYPE TABLE OF selopt,
+      it_doc_type      TYPE TABLE OF selopt,
+      it_hbkid         TYPE TABLE OF selopt,
+      spool_date       TYPE TABLE OF selopt,
+      wa_data          TYPE selopt,
+      print_parameters TYPE pri_params,
+      valid_flag       TYPE char1,
+      lv_rqident       TYPE rspoid,
+      lv_spool_nr      TYPE tsp01-rqident,
+      lv_spool_dl      TYPE tsp01_sp0r-rqid_char,
+      it_pdf_file      TYPE ty_t_pdf,
+      wa_mess_att      TYPE solisti1,
+      it_mess_att      TYPE TABLE OF solisti1,
+      lv_buffer        TYPE string,
+      lv_rspotype      TYPE rsporc,
+      lv_status        TYPE sy-subrc,
+      lv_err_msg       TYPE rspoemsg,
+      lv_string        TYPE string,
+      wa_mess_body     TYPE solisti1,
+      wa_mess_attch    TYPE solisti1,
+      it_mess_body     TYPE TABLE OF solisti1,
+      it_attachment    TYPE TABLE OF solisti1,
+      it_packing_list  TYPE TABLE OF sopcklsti1,
+      wa_packing_list  TYPE sopcklsti1,
+      it_receivers     TYPE TABLE OF somlreci1,
+      wa_receivers     TYPE somlreci1,
+      wa_doc_data      TYPE sodocchgi1,
+      wa_cnt           TYPE i,
+      lv_cn            TYPE i.
+
+
+
+
+
+
+SELECT *
+  FROM zindb_rev_log
+  INTO TABLE @DATA(it_zindb_rev_log).
+
+LOOP AT it_zindb_rev_log INTO DATA(wa_zindb_rev_log) WHERE zmail_ind NE 'X'.
+
+  PERFORM print_payment_advice.
+  IF it_mess_att[] IS NOT INITIAL.
+    PERFORM email_payment_advice.
+  ENDIF.
+
+ENDLOOP.
+
+
+
+
+
+*&---------------------------------------------------------------------*
+*& Form print_payment_advice
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM print_payment_advice.
+
+  wa_data-sign = 'I'.
+  wa_data-option = 'CP'.
+  CONCATENATE sy-datum '*' INTO wa_data-low.
+  APPEND wa_data TO spool_date.
+  CLEAR wa_data.
+
+  SELECT SINGLE budat
+    FROM bkpf
+    INTO @DATA(lv_budat)
+    WHERE bukrs EQ 'R001'
+    AND gjahr EQ '2024'.
+
+  wa_data-sign = 'I'.
+  wa_data-option = 'EQ'.
+  wa_data-low = lv_budat.
+  wa_data-high = '00000000'.
+  APPEND wa_data TO it_date.
+  CLEAR wa_data.
+
+  wa_data-sign = 'I'.
+  wa_data-option = 'EQ'.
+  wa_data-low = wa_zindb_rev_log-zcust_ref+4(10).
+  APPEND wa_data TO it_doc.
+  CLEAR wa_data.
+
+  wa_data-sign = 'I'.
+  wa_data-option = 'EQ'.
+  wa_data-low = '1002'.
+  APPEND wa_data TO it_doc_type.
+  CLEAR wa_data.
+
+  CALL FUNCTION 'GET_PRINT_PARAMETERS'
+    EXPORTING
+      copies                 = 1
+      destination            = 'LP01'(015)
+      expiration             = 1
+      immediately            = ' '
+      new_list_id            = 'X'
+      no_dialog              = 'X'
+    IMPORTING
+      out_parameters         = print_parameters
+      valid                  = valid_flag
+    EXCEPTIONS
+      archive_info_not_found = 1
+      invalid_print_params   = 2
+      invalid_archive_params = 3
+      OTHERS                 = 4.
+
+  IF sy-subrc EQ 0.
+    BREAK-POINT.
+    print_parameters-plist = 'ZINDB_MAIL'.
+    SUBMIT zfi_invoice_print_zv59a1 TO SAP-SPOOL
+            SPOOL PARAMETERS print_parameters
+            WITHOUT SPOOL DYNPRO
+            WITH bukrs    EQ 'R001'
+            WITH date     IN it_date        "'IEQ2023052500000000'
+            WITH document IN it_doc         "'IEQ0015002873'
+            WITH doc_typ  IN it_doc_type                    "'IEQ1002'
+            WITH hbkid    EQ 'INDKL'
+            AND RETURN.
+
+    WAIT UP TO 1 SECONDS.
+    SELECT MAX( rqident ) FROM tsp01 INTO lv_rqident
+      WHERE rqclient = sy-mandt
+        AND rqowner  = sy-uname
+        AND rqcretime IN spool_date
+        AND rq2name EQ 'ZINDB_MAIL'.
+
+  ENDIF.
+
+  lv_spool_nr = lv_rqident.
+  CALL FUNCTION 'CONVERT_ABAPSPOOLJOB_2_PDF'
+    EXPORTING
+      src_spoolid              = lv_spool_nr
+      no_dialog                = ' '
+    TABLES
+      pdf                      = it_pdf_file
+    EXCEPTIONS
+      err_no_abap_spooljob     = 1
+      err_no_spooljob          = 2
+      err_no_permission        = 3
+      err_conv_not_possible    = 4
+      err_bad_destdevice       = 5
+      user_cancelled           = 6
+      err_spoolerror           = 7
+      err_temseerror           = 8
+      err_btcjob_open_failed   = 9
+      err_btcjob_submit_failed = 10
+      err_btcjob_close_failed  = 11
+      OTHERS                   = 12.
+  IF sy-subrc EQ 0.
+    LOOP AT it_pdf_file INTO DATA(lw_pdf_file).
+      TRANSLATE lw_pdf_file USING '~'.
+      CONCATENATE lv_buffer lw_pdf_file INTO lv_buffer.
+    ENDLOOP.
+
+    TRANSLATE lv_buffer USING '~'.
+
+    DO.
+      wa_mess_att-line = lv_buffer.
+      APPEND wa_mess_att TO it_mess_att.
+      CLEAR wa_mess_att.
+      SHIFT lv_buffer LEFT BY 255 PLACES.
+      IF lv_buffer IS INITIAL.
+        EXIT.
+      ENDIF.
+    ENDDO.
+
+    lv_spool_dl = lv_spool_nr.
+
+    CALL FUNCTION 'RSPO_R_RDELETE_SPOOLREQ'
+      EXPORTING
+        spoolid       = lv_spool_dl
+      IMPORTING
+        rc            = lv_rspotype
+        status        = lv_status
+        error_message = lv_err_msg.
+  ENDIF.
+
+  CLEAR: lv_spool_nr, lv_rqident, lv_buffer, wa_mess_att.
+  REFRESH it_pdf_file.
+
+ENDFORM.
+*&---------------------------------------------------------------------*
+*& Form email_payment_advice
+*&---------------------------------------------------------------------*
+*& text
+*&---------------------------------------------------------------------*
+*& -->  p1        text
+*& <--  p2        text
+*&---------------------------------------------------------------------*
+FORM email_payment_advice .
+
+  wa_mess_body = 'Dear Sir / Madam,'(012).
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+  CLEAR wa_mess_body.
+  APPEND wa_mess_body TO it_mess_body.
+
+  wa_mess_body = 'Please find attached payment advice details for your reference.'(218).
+  APPEND wa_mess_body TO it_mess_body.
+
+  CLEAR wa_mess_body.
+  APPEND wa_mess_body TO it_mess_body.
+
+  wa_mess_body-line = |Customer Reference:| & | | & |{ wa_zindb_rev_log-zcust_ref }|.
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+  wa_mess_body-line = |Payment Method:| & | | & |{ wa_zindb_rev_log-zpay_method }|.
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+  wa_mess_body-line = |Amount:| & | | & |{ wa_zindb_rev_log-zamount }|.
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+  wa_mess_body-line = |UTR No:| & | | & |{ wa_zindb_rev_log-zutr }|.
+  APPEND wa_mess_body TO it_mess_body.
+
+  CLEAR wa_mess_body.
+  APPEND wa_mess_body TO it_mess_body.
+
+  wa_mess_body = 'Regards,'(014).
+  APPEND wa_mess_body TO it_mess_body.
+
+  wa_mess_body = 'On behalf of SAP Team in correspondence with IndusInd Bank'.
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+  wa_mess_body = 'Rupa & Company Limited'(206).
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+  CLEAR wa_mess_body.
+  APPEND wa_mess_body TO it_mess_body.
+
+  wa_mess_body = 'This is a system generated mail for your information only!'(206).
+  APPEND wa_mess_body TO it_mess_body.
+  CLEAR wa_mess_body.
+
+* Fill the document data.
+  wa_doc_data-doc_size = 1.
+  CLEAR: wa_doc_data, wa_cnt, wa_mess_attch.
+  DESCRIBE TABLE it_mess_att LINES wa_cnt.
+  READ TABLE it_mess_att INTO wa_mess_attch INDEX wa_cnt.
+  wa_doc_data-doc_size =
+  ( wa_cnt - 1 ) * 255 + strlen( wa_mess_attch ).
+  wa_doc_data-obj_langu = sy-langu.
+  wa_doc_data-obj_name = 'INDBPAY'."(209).
+  wa_doc_data-obj_descr = 'INDUSIND PAYMENT ADVICE'."(210).
+  wa_doc_data-sensitivty = 'F'."(208).
+  CLEAR wa_cnt.
+
+* Describe the body of the message
+  wa_packing_list-transf_bin = space.
+  wa_packing_list-head_start = 1.
+  wa_packing_list-head_num = 0.
+  wa_packing_list-body_start = 1.
+  DESCRIBE TABLE it_mess_body LINES wa_packing_list-body_num.
+  wa_packing_list-doc_type = 'RAW'(211).
+  APPEND wa_packing_list TO it_packing_list.
+  CLEAR wa_packing_list.
+
+* Create attachment notification
+  it_attachment[] = it_mess_att[].
+  wa_packing_list-transf_bin = 'X'.
+  wa_packing_list-head_start = 1.
+  wa_packing_list-head_num = 1.
+  wa_packing_list-body_start = 1.
+  DESCRIBE TABLE it_mess_att LINES wa_packing_list-body_num.
+  wa_cnt = wa_packing_list-body_num + 1.
+  wa_packing_list-doc_type = 'PDF'(213).
+  wa_packing_list-obj_descr = 'PAYMENT ADVICE'(217).
+  wa_packing_list-obj_name = ''.
+  wa_packing_list-doc_size = wa_packing_list-body_num * 255.
+  APPEND wa_packing_list TO it_packing_list.
+  CLEAR wa_packing_list.
+
+  CLEAR lv_cn.
+  DESCRIBE TABLE it_mess_att LINES lv_cn.
+  APPEND LINES OF it_mess_att TO it_attachment.
+*  wa_packing_list-transf_bin = 'X'.
+*  wa_packing_list-head_start = 1.
+*  wa_packing_list-head_num = 1.
+*  wa_packing_list-body_start = wa_cnt.
+  CLEAR wa_cnt.
+
+  wa_receivers-receiver = 'sujata.it@rupa.co.in'.
+  wa_receivers-rec_type = 'U'.
+  wa_receivers-com_type = 'INT'.
+  APPEND wa_receivers TO it_receivers.
+  CLEAR wa_receivers.
+
+
+  """" Adding CC
+  wa_receivers-receiver = 'biprajit.it@rupa.co.in'.
+  wa_receivers-copy = 'X'.
+  wa_receivers-rec_type = 'U'."(215).
+  wa_receivers-com_type = 'INT'."(216).
+  APPEND wa_receivers TO it_receivers.
+  CLEAR wa_receivers.
+
+  CALL FUNCTION 'SO_DOCUMENT_SEND_API1'
+    EXPORTING
+      document_data              = wa_doc_data
+      put_in_outbox              = 'X'
+      commit_work                = 'X'
+    TABLES
+      packing_list               = it_packing_list
+      contents_bin               = it_attachment
+      contents_txt               = it_mess_body
+      receivers                  = it_receivers
+    EXCEPTIONS
+      too_many_receivers         = 1
+      document_not_sent          = 2
+      document_type_not_exist    = 3
+      operation_no_authorization = 4
+      parameter_error            = 5
+      x_error                    = 6
+      enqueue_error              = 7
+      OTHERS                     = 8.
+
+ENDFORM.
